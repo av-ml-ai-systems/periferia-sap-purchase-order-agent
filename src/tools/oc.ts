@@ -1,4 +1,3 @@
-
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -51,7 +50,10 @@ async function texto(file: string): Promise<string | null> {
 
 async function json<T>(file: string): Promise<T | null> {
   const content = await texto(file);
-  if (content === null) return null;
+
+  if (content === null) {
+    return null;
+  }
 
   try {
     return JSON.parse(content) as T;
@@ -79,17 +81,24 @@ function fechaEn(text: string | null): string | null {
 }
 
 function totalCotizacion(text: string | null): number | null {
-  if (!text) return null;
+  if (!text) {
+    return null;
+  }
 
   const lines = text.split(/\r?\n/);
   const line = lines.find(
     (item) => /\btotal\b/i.test(item) && !/subtotal/i.test(item),
   );
 
-  if (!line) return null;
+  if (!line) {
+    return null;
+  }
 
   const match = line.match(/(?:COP\s*)?\$?\s*([\d.]+(?:,\d{1,2})?)/i);
-  if (!match?.[1]) return null;
+
+  if (!match?.[1]) {
+    return null;
+  }
 
   const value = Number(
     match[1].replace(/\./g, "").replace(",", "."),
@@ -219,7 +228,6 @@ export async function oc_validar(
   }
 
   // RC3: comprobar el tope incluso si quien aprobó no está autorizado.
-  // En ese caso se utiliza el mayor tope autorizado del centro de costo.
   const topeAplicable =
     aprobador?.tope ??
     (centro && centro.aprobadores.length > 0

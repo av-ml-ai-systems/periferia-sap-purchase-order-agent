@@ -1,18 +1,17 @@
-
 # Agente Conversacional de Órdenes de Compra SAP
 
-Reto 3 — Periferia IT Group
+**Reto 3 — Periferia IT Group**
 
 Agente conversacional para revisar solicitudes de órdenes de compra a partir de paquetes de prueba, validar reglas de negocio y simular la creación de órdenes SAP. La solución incluye una interfaz web, una API REST, interpretación de lenguaje natural mediante Ollama y trazabilidad local.
 
-> **Alcance:** la integración SAP es simulada. No se realizan operaciones en un sistema SAP real.
+> **Alcance:** la integración con SAP es simulada. No se realizan operaciones en un sistema SAP real.
 
 ## Arquitectura
 
-- **Interfaz:** HTML, CSS y JavaScript en `public/`.
-- **API:** Node.js, Express, TypeScript y Zod.
+- **Interfaz web:** HTML, CSS y JavaScript en `public/`.
+- **API REST:** Node.js, Express, TypeScript y Zod.
 - **LLM local:** Ollama con `llama3.2:1b`.
-- **Herramientas de negocio:** lectura de paquetes, validación y creación simulada de órdenes.
+- **Herramientas de negocio:** lectura de paquetes de prueba, validación y creación simulada de órdenes.
 - **Datos de prueba:** archivos JSON y TXT en `fixtures/reto-03/`.
 - **Salidas:** evidencias, trazabilidad y registro de órdenes simuladas en `out/`.
 
@@ -20,22 +19,22 @@ Agente conversacional para revisar solicitudes de órdenes de compra a partir de
 
 - Node.js y npm.
 - Ollama instalado.
-- Modelo `llama3.2:1b` disponible localmente.
+- Modelo `llama3.2:1b` descargado localmente.
 
 ## Instalación y ejecución
+
+Desde la raíz del proyecto, instala las dependencias y descarga el modelo:
 
 ```powershell
 npm install
 ollama pull llama3.2:1b
 ```
 
-En una terminal, inicia Ollama si no está activo:
+Si Ollama no se está ejecutando como servicio, inicia el servidor en una terminal:
 
 ```powershell
 ollama serve
 ```
-
-Si Ollama ya está ejecutándose como servicio, no necesitas iniciar otra instancia.
 
 En otra terminal, inicia la aplicación:
 
@@ -43,29 +42,29 @@ En otra terminal, inicia la aplicación:
 npm run dev
 ```
 
-Abre [http://localhost:3000](http://localhost:3000).
+Abre http://localhost:3000 en el navegador.
 
 ## Pruebas rápidas
 
-Comprobar tipos de TypeScript:
+### 1. Verificar los tipos de TypeScript
 
 ```powershell
 npx tsc --noEmit
 ```
 
-Ejecutar la demostración de los seis casos:
+### 2. Ejecutar los seis casos de demostración
 
 ```powershell
 npm run demo
 ```
 
-Comprobar la API:
+### 3. Comprobar el estado de la API
 
 ```powershell
-Invoke-RestMethod http://localhost:3000/api/health
+Invoke-RestMethod -Uri "http://localhost:3000/api/health"
 ```
 
-Enviar una solicitud conversacional:
+### 4. Enviar una solicitud conversacional
 
 ```powershell
 $body = @{
@@ -84,11 +83,13 @@ Invoke-RestMethod `
 
 ### `GET /api/health`
 
-Devuelve el estado básico de la API, proveedor y modelo configurado.
+Devuelve información sobre el estado básico de la API, el proveedor y el modelo configurado.
 
 ### `POST /api/chat`
 
-Cuerpo:
+Recibe un mensaje conversacional y el identificador de sesión.
+
+Ejemplo de cuerpo JSON:
 
 ```json
 {
@@ -97,7 +98,7 @@ Cuerpo:
 }
 ```
 
-Devuelve la respuesta conversacional, las herramientas ejecutadas y si existe una confirmación pendiente.
+La respuesta contiene el resultado conversacional, las herramientas ejecutadas y, cuando corresponde, información sobre una confirmación pendiente.
 
 ### `GET /api/sessions/:id`
 
@@ -105,17 +106,18 @@ Consulta el historial en memoria de una sesión existente.
 
 ## Casos de prueba
 
-- `sol-001`: solicitud válida.
-- `sol-002`: proveedor inexistente.
-- `sol-003`: problemas de autorización y límite monetario.
-- `sol-004`: diferencia entre solicitud y cotización que requiere confirmación.
-- `sol-005`: detección de fecha retroactiva que requiere confirmación.
-- `sol-006`: datos derivados de los maestros que requieren confirmación cuando corresponde.
+- **`sol-001`:** solicitud válida; creación simulada de una orden y comportamiento idempotente.
+- **`sol-002`:** proveedor inexistente.
+- **`sol-003`:** problemas de autorización y límite monetario.
+- **`sol-004`:** diferencia entre solicitud y cotización que requiere confirmación.
+- **`sol-005`:** detección de fecha retroactiva que requiere confirmación.
+- **`sol-006`:** datos derivados de los maestros que requieren confirmación cuando corresponde.
 
 ## Seguridad y limitaciones
 
-- No se conecta a SAP real.
+- No existe conexión con un sistema SAP real.
 - Las órdenes son simuladas y los registros se almacenan localmente.
 - Las sesiones se guardan en memoria y se pierden al reiniciar el servidor.
-- El modelo interpreta la intención, pero las validaciones de negocio se ejecutan mediante código determinista.
-- La aplicación está diseñada para demostración local, no para producción.
+- El modelo interpreta la intención del usuario; las validaciones de negocio se ejecutan mediante código determinista.
+- La solución está diseñada para una demostración local, no para un entorno de producción.
+- No se incluye un despliegue público en esta entrega.

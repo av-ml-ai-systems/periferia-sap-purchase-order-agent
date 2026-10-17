@@ -1,4 +1,3 @@
-
 import { promises as fs } from "node:fs";
 import {
   oc_validar,
@@ -35,7 +34,10 @@ async function main(): Promise<void> {
         console.log("Segundo intento (idempotencia):", segundoIntento);
       }
 
-      if (id === "sol-004" && resultado.resultado === "pendiente_confirmacion") {
+      if (
+        id === "sol-004" &&
+        resultado.resultado === "pendiente_confirmacion"
+      ) {
         const confirmado = await oc_crear(
           id,
           true,

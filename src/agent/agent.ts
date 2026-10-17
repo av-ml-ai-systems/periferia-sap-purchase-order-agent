@@ -8,6 +8,7 @@ import {
 import {
   oc_leer_paquete,
   oc_validar,
+  oc_crear,
 } from "../tools/oc.js";
 
 const parsedLimit = Number.parseInt(
@@ -86,6 +87,10 @@ type ValidationResult = {
 function extractCase(message: string): string | null {
   const normalized = message.toLowerCase();
 
+  if (/\b(el|la|este|esta)?\s*(primer|primera)\s+(caso|solicitud)\b/i.test(normalized)) {
+    return "sol-001";
+  }
+
   const patterns = [
     /\bsol(?:icitud)?[\s-]+sol[-\s]?00([1-6])\b/i,
     /\bsol[-\s]?00([1-6])\b/i,
@@ -101,6 +106,12 @@ function extractCase(message: string): string | null {
   }
 
   return null;
+}
+
+function requestsCreation(message: string): boolean {
+  return /\b(crea|crear|creame|créame|generar|genera|genere|emitir|emite|registrar|registra|crear|creación)\b/i.test(
+    message,
+  );
 }
 
 async function auditTool(
@@ -264,12 +275,98 @@ async function executeValidation(
   }
 }
 
+async function executeCreation(
+  sessionId: string,
+  caseId: string,
+): Promise<AgentResult> {
+  const parsedCase = CaseId.parse(caseId);
+  const args = {
+    caso: parsedCase,
+    confirmado: false,
+  };
+
+  try {
+    const result = await oc_crear(parsedCase, false, sessionId);
+    const status = result.resultado === "bloqueada" ? "error" : "success";
+
+    await auditTool(
+      sessionId,
+      "oc_crear",
+      args,
+      result,
+      status,
+    );
+
+    const toolCall: AgentToolCall = {
+      tool: "oc_crear",
+      status,
+      arguments: args,
+      result,
+    };
+
+    if (result.resultado === "creada") {
+      return {
+        reply:
+          `Orden creada correctamente para ${parsedCase}. ` +
+          `Número de OC: ${result.numero_oc}.`,
+        toolCalls: [toolCall],
+        needsConfirmation: false,
+        pendingCase: null,
+      };
+    }
+
+    if (result.resultado === "pendiente_confirmacion") {
+      const confirmations = result.confirmaciones ?? [];
+
+      return {
+        reply:
+          `La solicitud ${parsedCase} requiere confirmación humana:\n- ` +
+          `${confirmations.join("\n- ")}\n\n` +
+          "Responde «confirmo» para continuar o «cancelar» para detener la operación.",
+        toolCalls: [toolCall],
+        needsConfirmation: true,
+        pendingCase: parsedCase,
+      };
+    }
+
+    return {
+      reply:
+        `No se pudo crear la orden para ${parsedCase}:\n- ` +
+        `${(result.bloqueos ?? []).join("\n- ")}`,
+      toolCalls: [toolCall],
+      needsConfirmation: false,
+      pendingCase: null,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Error desconocido.";
+
+    return {
+      reply: `No pude crear la orden para ${parsedCase}: ${message}`,
+      toolCalls: [
+        {
+          tool: "oc_crear",
+          status: "error",
+          arguments: args,
+          result: { error: message },
+        },
+      ],
+      needsConfirmation: false,
+      pendingCase: null,
+    };
+  }
+}
+
 export async function runAgent(
   context: AgentContext,
 ): Promise<AgentResult> {
   const caseId = extractCase(context.message);
 
   if (caseId) {
+    if (requestsCreation(context.message)) {
+      return executeCreation(context.sessionId, caseId);
+    }
+
     return executeValidation(context.sessionId, caseId);
   }
 

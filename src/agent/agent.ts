@@ -84,13 +84,23 @@ type ValidationResult = {
 };
 
 function extractCase(message: string): string | null {
-  const match = message.match(/\bsol[- ]?00[1-6]\b/i);
+  const normalized = message.toLowerCase();
 
-  if (!match) {
-    return null;
+  const patterns = [
+    /\bsol(?:icitud)?[\s-]+sol[-\s]?00([1-6])\b/i,
+    /\bsol[-\s]?00([1-6])\b/i,
+    /\bsolicitud\s+00([1-6])\b/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+
+    if (match) {
+      return `sol-00${match[1]}`;
+    }
   }
 
-  return `sol-${match[0].slice(-3)}`;
+  return null;
 }
 
 async function auditTool(
@@ -183,67 +193,84 @@ function buildValidationReply(
   };
 }
 
+function looksLikeToolSchema(content: string): boolean {
+  return (
+    /"name"\s*:\s*"(?:oc_leer_paquete|oc_validar|oc_crear)"/i.test(
+      content,
+    ) ||
+    /"parameters"\s*:\s*\{[\s\S]*"properties"\s*:/i.test(content)
+  );
+}
+
+async function executeValidation(
+  sessionId: string,
+  caseId: string,
+): Promise<AgentResult> {
+  const toolCalls: AgentToolCall[] = [];
+  const parsedCase = CaseId.parse(caseId);
+  const args = { caso: parsedCase };
+
+  try {
+    const readResult = await oc_leer_paquete(parsedCase);
+
+    toolCalls.push({
+      tool: "oc_leer_paquete",
+      status: "success",
+      arguments: args,
+      result: readResult,
+    });
+
+    await auditTool(
+      sessionId,
+      "oc_leer_paquete",
+      args,
+      readResult,
+      "success",
+    );
+
+    const validationResult = await oc_validar(parsedCase);
+
+    toolCalls.push({
+      tool: "oc_validar",
+      status: "success",
+      arguments: args,
+      result: validationResult,
+    });
+
+    await auditTool(
+      sessionId,
+      "oc_validar",
+      args,
+      validationResult,
+      "success",
+    );
+
+    const answer = buildValidationReply(parsedCase, validationResult);
+
+    return {
+      ...answer,
+      toolCalls,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Error desconocido.";
+
+    return {
+      reply: `No pude procesar ${parsedCase}: ${message}`,
+      toolCalls,
+      needsConfirmation: false,
+      pendingCase: null,
+    };
+  }
+}
+
 export async function runAgent(
   context: AgentContext,
 ): Promise<AgentResult> {
   const caseId = extractCase(context.message);
 
   if (caseId) {
-    const toolCalls: AgentToolCall[] = [];
-
-    try {
-      const readArgs = { caso: CaseId.parse(caseId) };
-      const readResult = await oc_leer_paquete(readArgs.caso);
-
-      toolCalls.push({
-        tool: "oc_leer_paquete",
-        status: "success",
-        arguments: readArgs,
-        result: readResult,
-      });
-
-      await auditTool(
-        context.sessionId,
-        "oc_leer_paquete",
-        readArgs,
-        readResult,
-        "success",
-      );
-
-      const validationResult = await oc_validar(readArgs.caso);
-
-      toolCalls.push({
-        tool: "oc_validar",
-        status: "success",
-        arguments: readArgs,
-        result: validationResult,
-      });
-
-      await auditTool(
-        context.sessionId,
-        "oc_validar",
-        readArgs,
-        validationResult,
-        "success",
-      );
-
-      const answer = buildValidationReply(caseId, validationResult);
-
-      return {
-        ...answer,
-        toolCalls,
-      };
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Error desconocido.";
-
-      return {
-        reply: `No pude procesar ${caseId}: ${message}`,
-        toolCalls,
-        needsConfirmation: false,
-        pendingCase: null,
-      };
-    }
+    return executeValidation(context.sessionId, caseId);
   }
 
   const messages: LLMMessage[] = [
@@ -251,8 +278,13 @@ export async function runAgent(
       role: "system",
       content:
         "Eres un agente conversacional de órdenes de compra SAP simulado. " +
-        "Responde en español. Pide el identificador de la solicitud " +
-        "si el usuario no lo proporciona. Nunca inventes resultados.",
+        "Responde siempre en español y con lenguaje claro para el usuario. " +
+        "Las herramientas son acciones que debes solicitar mediante " +
+        "tool calling; nunca muestres sus esquemas JSON, propiedades, " +
+        "parámetros ni definiciones como respuesta. " +
+        "No inventes validaciones ni resultados. " +
+        "Si el usuario quiere revisar una solicitud pero no proporciona " +
+        "un identificador, pídele uno entre sol-001 y sol-006.",
     },
     ...(context.history ?? []),
     { role: "user", content: context.message },
@@ -276,15 +308,29 @@ export async function runAgent(
     }
 
     if (response.toolCalls.length === 0) {
+      const content = response.content?.trim() ?? "";
+
+      if (content && !looksLikeToolSchema(content)) {
+        return {
+          reply: content,
+          toolCalls: [],
+          needsConfirmation: false,
+          pendingCase: null,
+        };
+      }
+
       return {
         reply:
-          response.content ||
-          "Indica el identificador de la solicitud, por ejemplo sol-002.",
+          "No pude interpretar correctamente la respuesta del modelo. " +
+          "Si quieres revisar una solicitud, indica su identificador, " +
+          "por ejemplo sol-002.",
         toolCalls: [],
         needsConfirmation: false,
         pendingCase: null,
       };
     }
+
+    let executedTool = false;
 
     for (const call of response.toolCalls) {
       if (call.name !== "oc_leer_paquete" && call.name !== "oc_validar") {
@@ -299,6 +345,7 @@ export async function runAgent(
         continue;
       }
 
+      executedTool = true;
       const args = parsed.data;
 
       try {
@@ -307,13 +354,6 @@ export async function runAgent(
             ? await oc_leer_paquete(args.caso)
             : await oc_validar(args.caso);
 
-        const toolCall: AgentToolCall = {
-          tool: call.name,
-          status: "success",
-          arguments: args,
-          result,
-        };
-
         await auditTool(
           context.sessionId,
           call.name,
@@ -321,6 +361,13 @@ export async function runAgent(
           result,
           "success",
         );
+
+        const toolCall: AgentToolCall = {
+          tool: call.name,
+          status: "success",
+          arguments: args,
+          result,
+        };
 
         if (call.name === "oc_validar") {
           const answer = buildValidationReply(args.caso, result);
@@ -368,6 +415,17 @@ export async function runAgent(
           pendingCase: null,
         };
       }
+    }
+
+    if (!executedTool) {
+      return {
+        reply:
+          "El modelo no solicitó una herramienta válida. " +
+          "Indica el identificador de la solicitud, por ejemplo sol-002.",
+        toolCalls: [],
+        needsConfirmation: false,
+        pendingCase: null,
+      };
     }
   }
 

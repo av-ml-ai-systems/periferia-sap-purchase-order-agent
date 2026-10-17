@@ -2,7 +2,7 @@
 
 **Reto 3 — Periferia IT Group**
 
-Agente conversacional para revisar solicitudes de órdenes de compra a partir de paquetes de prueba, validar reglas de negocio y simular la creación de órdenes SAP. La solución incluye una interfaz web, una API REST, interpretación de lenguaje natural mediante Ollama y trazabilidad local.
+Agente conversacional para revisar solicitudes de órdenes de compra a partir de paquetes de prueba, validar reglas de negocio y simular la creación de órdenes de compra en SAP. La solución incluye una interfaz web, una API REST, interpretación de lenguaje natural mediante Ollama y trazabilidad local.
 
 > **Alcance:** la integración con SAP es simulada. No se realizan operaciones en un sistema SAP real.
 
@@ -11,7 +11,9 @@ Agente conversacional para revisar solicitudes de órdenes de compra a partir de
 - **Interfaz web:** HTML, CSS y JavaScript en `public/`.
 - **API REST:** Node.js, Express, TypeScript y Zod.
 - **LLM local:** Ollama con `llama3.2:1b`.
-- **Herramientas de negocio:** lectura de paquetes de prueba, validación y creación simulada de órdenes.
+- **Herramientas de negocio:** lectura de paquetes de prueba, validación de reglas y creación de órdenes de compra.
+- **Adaptador SAP:** contrato `SapAdapter` e implementación `MockSapAdapter` para simular las consultas de proveedores y la creación de órdenes.
+- **Idempotencia:** consulta de órdenes existentes por referencia de solicitud para evitar duplicar órdenes al procesar una misma solicitud.
 - **Datos de prueba:** archivos JSON y TXT en `fixtures/reto-03/`.
 - **Salidas:** evidencias, trazabilidad y registro de órdenes simuladas en `out/`.
 
@@ -42,7 +44,7 @@ En otra terminal, inicia la aplicación:
 npm run dev
 ```
 
-Abre http://localhost:3000 en el navegador.
+Abre [http://localhost:3000](http://localhost:3000) en el navegador.
 
 ## Pruebas rápidas
 
@@ -116,7 +118,8 @@ Consulta el historial en memoria de una sesión existente.
 ## Seguridad y limitaciones
 
 - No existe conexión con un sistema SAP real.
-- Las órdenes son simuladas y los registros se almacenan localmente.
+- Las órdenes son simuladas mediante `MockSapAdapter`; no se crean órdenes en SAP.
+- Los registros de órdenes y la trazabilidad se almacenan localmente en `out/`.
 - Las sesiones se guardan en memoria y se pierden al reiniciar el servidor.
 - El modelo interpreta la intención del usuario; las validaciones de negocio se ejecutan mediante código determinista.
 - La solución está diseñada para una demostración local, no para un entorno de producción.

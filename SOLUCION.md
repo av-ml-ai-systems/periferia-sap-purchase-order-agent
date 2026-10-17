@@ -4,7 +4,7 @@
 
 Se implementó un prototipo de agente conversacional para revisar solicitudes de compra, ejecutar controles de negocio, solicitar confirmación humana cuando corresponde y simular la creación de órdenes de compra (OC).
 
-La solución combina una interfaz web de chat, un agente que utiliza un modelo de lenguaje local y herramientas deterministas para validar los datos y gestionar la creación simulada.
+La solución combina una interfaz web de chat, un agente que utiliza un modelo de lenguaje local y herramientas deterministas para validar los datos y gestionar la creación simulada de órdenes.
 
 **Alcance actual:** las órdenes se simulan mediante archivos locales. No se ejecutan transacciones en un sistema SAP real.
 
@@ -17,7 +17,9 @@ La solución combina una interfaz web de chat, un agente que utiliza un modelo d
 - **`src/agent/agent.ts`:** lógica de interacción del agente, selección de herramientas y gestión de confirmaciones.
 - **`src/agent/audit.ts`:** registro de eventos de auditoría.
 - **`src/llm/ollama.ts`:** comunicación con el modelo local mediante Ollama.
-- **`src/tools/oc.ts`:** lectura del paquete documental, validaciones, construcción del payload, generación de evidencia y simulación de creación.
+- **`src/tools/oc.ts`:** lectura del paquete documental, validaciones, construcción del payload, generación de evidencia y coordinación de la creación simulada.
+- **`src/sap/adapter.ts`:** contrato `SapAdapter`, que define las operaciones para consultar proveedores, crear órdenes y buscar órdenes existentes por referencia.
+- **`src/sap/mock.ts`:** implementación `MockSapAdapter`, que simula las operaciones SAP y registra las órdenes en archivos locales.
 - **`agent/prompt.md`:** instrucciones del agente separadas del código.
 - **`fixtures/reto-03/`:** solicitudes de prueba y maestros de proveedores y centros de costo.
 - **`demo.ts`:** demostración determinista de los seis casos, sin depender del modelo de lenguaje.
@@ -31,8 +33,9 @@ La solución combina una interfaz web de chat, un agente que utiliza un modelo d
 4. Se ejecutan los controles de negocio mediante código determinista.
 5. Si existen bloqueos, se informa al usuario y se impide crear la orden.
 6. Si se requiere confirmación, la operación queda pendiente.
-7. Cuando se autoriza continuar, se construye el payload, se genera evidencia y se registra la orden simulada.
-8. El resultado queda registrado para facilitar su trazabilidad y auditoría.
+7. Cuando se cumplen las condiciones para continuar, se construye el payload, se genera evidencia y se invoca el adaptador SAP simulado.
+8. El adaptador consulta si ya existe una orden para la referencia de la solicitud y, cuando corresponde, registra la nueva orden simulada.
+9. El resultado queda registrado para facilitar su trazabilidad y auditoría.
 
 Las validaciones críticas se ejecutan en código determinista y no se delegan exclusivamente al modelo de lenguaje.
 
@@ -46,19 +49,32 @@ Las operaciones principales se implementan en `src/tools/oc.ts`.
 | `oc_validar` | Ejecuta los controles y devuelve bloqueos, confirmaciones, valores derivados y condición retroactiva. |
 | `oc_construir_payload` | Prepara la estructura de la orden de compra y registra la trazabilidad de sus fuentes. |
 | `oc_generar_evidencia` | Genera evidencia textual de la aprobación y calcula su hash SHA-256. |
-| `oc_crear` | Comprueba bloqueos y confirmaciones, aplica idempotencia básica y registra la orden simulada. |
+| `oc_crear` | Comprueba bloqueos y confirmaciones, consulta al adaptador simulado, verifica órdenes previas y registra la orden cuando corresponde. |
 
-### 3.1 Contrato de las herramientas
+### 3.1 Adaptador SAP
+
+El contrato `SapAdapter`, definido en `src/sap/adapter.ts`, desacopla el flujo de negocio de la implementación específica de SAP.
+
+La implementación `MockSapAdapter`, definida en `src/sap/mock.ts`, permite ejecutar el flujo sin credenciales ni conexión a una instancia empresarial. Sus operaciones permiten:
+
+- Consultar si un proveedor existe y está activo.
+- Buscar una orden previamente registrada por referencia de solicitud.
+- Simular la creación de una orden de compra.
+- Registrar las órdenes simuladas en `out/sap/ordenes.jsonl`.
+
+La integración entre `oc_crear()` y `MockSapAdapter` está implementada. Este adaptador permite demostrar el flujo local, pero no sustituye una integración con SAP real.
+
+### 3.2 Contrato de las herramientas
 
 Las funciones devuelven resultados estructurados para que el agente pueda comunicar el estado de la operación.
 
-Como mejora pendiente, se recomienda estandarizar todas las herramientas con un contrato común, por ejemplo `{ ok, data, error }`, y validar sus entradas y salidas mediante esquemas como Zod.
+Como mejora futura, se recomienda estandarizar las respuestas de todas las herramientas mediante un contrato común, por ejemplo `{ ok, data, error }`, y validar sus entradas y salidas mediante esquemas como Zod cuando corresponda.
 
 ## 4. Matriz de controles de negocio RC1–RC10
 
 | Control | Regla | Comportamiento implementado |
 |---|---|---|
-| RC1 | Proveedor existente y activo | Bloquea proveedores inexistentes o inactivos. Busca por NIT cuando está disponible; de lo contrario, normaliza el nombre. |
+| RC1 | Proveedor existente y activo | Bloquea proveedores inexistentes o inactivos. La consulta del proveedor se realiza mediante el adaptador simulado. |
 | RC2 | Aprobación válida | Bloquea si no existe una aprobación reconocible, si no contiene la expresión de aprobación o si el remitente no está autorizado para el centro de costo. |
 | RC3 | Límite de aprobación | Bloquea importes superiores al tope aplicable. |
 | RC4 | Centro de costo y subárea | Bloquea centros inexistentes o subáreas no asociadas al centro. |
@@ -114,21 +130,23 @@ En producción, se recomienda utilizar almacenamiento protegido, controles de ac
 
 ### 6.2 Idempotencia
 
-La implementación busca órdenes previas por `solicitud_id` antes de crear una nueva orden.
+La implementación busca órdenes previas por `solicitud_id` mediante el adaptador simulado antes de crear una nueva orden.
 
 Esto permite demostrar idempotencia en la ejecución local secuencial. No ofrece garantías transaccionales frente a solicitudes concurrentes, fallos parciales o múltiples instancias de la aplicación.
 
-## 7. Diseño propuesto para una integración real con SAP
+## 7. Diseño para una integración real con SAP
 
 ### 7.1 Estado actual
 
-La creación de órdenes está simulada mediante archivos locales. No hay conexión activa con SAP, credenciales empresariales ni confirmación de transacciones en un sistema real.
+El contrato `SapAdapter` y la implementación `MockSapAdapter` están implementados e integrados con el flujo de creación de órdenes.
 
-### 7.2 Arquitectura recomendada
+La creación sigue siendo simulada mediante archivos locales. No hay conexión activa con SAP, credenciales empresariales ni confirmación de transacciones en un sistema real.
 
-Se propone aislar la lógica de negocio detrás de una interfaz `SapAdapter`, con operaciones para crear y consultar órdenes de compra.
+### 7.2 Arquitectura propuesta
 
-Esta separación permitiría mantener las herramientas de negocio y las pruebas independientes de la tecnología concreta de integración.
+El contrato `SapAdapter` permite mantener separada la lógica de negocio de la tecnología concreta de integración. Para conectarse a SAP real, sería necesario desarrollar una implementación adicional del contrato y configurar los servicios, credenciales, permisos y mecanismos de seguridad correspondientes.
+
+La implementación simulada se conservaría para pruebas locales y escenarios que no requieran acceso a SAP.
 
 ### 7.3 Alternativa de integración
 
@@ -210,9 +228,9 @@ Las excepciones relevantes requieren confirmación antes de continuar.
 
 ### 9.5 Simulación de SAP
 
-Se simula la creación para demostrar las reglas sin credenciales ni acceso a una instancia SAP.
+La creación se simula mediante `MockSapAdapter` para demostrar las reglas sin credenciales ni acceso a una instancia SAP.
 
-**Ventaja:** permite evaluar el flujo localmente.
+**Ventaja:** permite evaluar el flujo localmente y mantiene desacoplada la lógica de negocio.
 
 **Trade-off:** no prueba la compatibilidad con una instalación SAP real.
 
@@ -234,14 +252,14 @@ Se simula la creación para demostrar las reglas sin credenciales ni acceso a un
 | HU2 — Validación de reglas | Devuelve aptitud, bloqueos, confirmaciones, derivados y condición retroactiva. | Implementada para los seis escenarios de demostración. |
 | HU3 — Construcción del payload | Construye el payload con datos de solicitud, proveedor, aprobación y valores derivados; registra fuentes. | Implementada en modo local; requiere verificar el esquema SAP real. |
 | HU4 — Evidencia de aprobación | Genera texto con campos de aprobación y hash SHA-256. | Implementada; autenticidad y conservación inmutable requieren controles adicionales. |
-| HU5 — Creación condicionada e idempotencia | Bloquea solicitudes inválidas, requiere confirmación y simula creación con búsqueda por `solicitud_id`. | Implementada en modo local; sin garantías transaccionales frente a concurrencia. |
+| HU5 — Creación condicionada e idempotencia | Bloquea solicitudes inválidas, requiere confirmación y utiliza el adaptador simulado para consultar y registrar órdenes por `solicitud_id`. | Implementada en modo local; sin garantías transaccionales frente a concurrencia. |
 | HU6 — Errores legibles y continuidad | La demo informa errores y continúa procesando los casos siguientes. | Parcial: se recomienda uniformar el manejo de excepciones de todas las herramientas. |
 
 ## 12. Uso de inteligencia artificial
 
 La solución utiliza un modelo de lenguaje local mediante Ollama para facilitar la interacción conversacional.
 
-Las reglas de negocio, las comparaciones de importes, las búsquedas en maestros y la creación simulada se realizan mediante código determinista. El modelo no tiene autorización para crear órdenes reales ni para anular los bloqueos definidos en las herramientas.
+Las reglas de negocio, las comparaciones de importes, las búsquedas en maestros y la creación simulada se realizan mediante código determinista y el adaptador simulado. El modelo no tiene autorización para crear órdenes reales ni para anular los bloqueos definidos en las herramientas.
 
 El desarrollo asistido por IA requiere revisión del código y ejecución de pruebas. La responsabilidad de verificar los resultados y garantizar el cumplimiento de los requisitos corresponde al desarrollador.
 
@@ -251,7 +269,7 @@ El desarrollo asistido por IA requiere revisión del código y ejecución de pru
 |---|---|
 | El modelo interpreta incorrectamente una solicitud. | Limitar las acciones mediante herramientas y validar identificadores y argumentos. |
 | Un proveedor o aprobador se identifica incorrectamente. | Consultar maestros oficiales y validar autorizaciones en el sistema corporativo. |
-| Se crea una orden duplicada. | Implementar una clave idempotente en el backend y restricciones transaccionales. |
+| Se crea una orden duplicada. | Mantener la búsqueda por referencia e implementar garantías transaccionales en el backend productivo. |
 | La confirmación no corresponde a un usuario autorizado. | Incorporar autenticación, autorización y registro verificable de identidad. |
 | La evidencia se modifica después de calcular el hash. | Utilizar almacenamiento inmutable, controles de acceso y verificación de integridad. |
 | Se pierde el estado por reinicio o concurrencia. | Sustituir archivos locales por almacenamiento transaccional. |
@@ -261,19 +279,20 @@ El desarrollo asistido por IA requiere revisión del código y ejecución de pru
 
 ## 14. Limitaciones y siguientes pasos
 
-El prototipo demuestra el flujo conversacional, las reglas principales, las confirmaciones y la generación local de evidencias. No constituye todavía un sistema productivo de compras.
+El prototipo demuestra el flujo conversacional, las reglas principales, las confirmaciones, la generación local de evidencias y la creación simulada mediante un adaptador desacoplado. No constituye todavía un sistema productivo de compras.
 
-Antes de una puesta en producción se recomienda:
+Los principales pasos pendientes antes de una puesta en producción son:
 
-1. Incorporar una interfaz formal `SapAdapter` y una implementación mock independiente.
-2. Uniformar los contratos de las herramientas y aplicar esquemas Zod a las entradas y salidas.
-3. Ampliar las pruebas unitarias, de integración, concurrencia y recuperación ante fallos.
-4. Implementar persistencia transaccional e idempotencia resistente a concurrencia.
-5. Incorporar autenticación, autorización y gestión segura de secretos.
-6. Validar el payload contra el esquema de la instalación SAP objetivo.
-7. Mejorar la extracción y validación de documentos y fechas.
-8. Añadir monitoreo, métricas y procedimientos de recuperación.
-9. Verificar la interfaz conversacional y las confirmaciones en escenarios adicionales.
+1. Uniformar los contratos de las herramientas y aplicar esquemas de validación a las entradas y salidas.
+2. Ampliar las pruebas unitarias, de integración, concurrencia y recuperación ante fallos.
+3. Implementar persistencia transaccional e idempotencia resistente a concurrencia.
+4. Incorporar autenticación, autorización y gestión segura de secretos.
+5. Validar el payload contra el esquema de la instalación SAP objetivo e implementar el adaptador real cuando exista acceso autorizado.
+6. Mejorar la extracción y validación de documentos y fechas.
+7. Añadir monitoreo, métricas y procedimientos de recuperación.
+8. Evaluar y completar un despliegue público si los requisitos de entrega lo exigen.
+
+El despliegue público y la integración con SAP real no forman parte del estado actual de la solución.
 
 ## 15. Ejecución local
 
@@ -298,7 +317,7 @@ ollama pull llama3.2:1b
 npm run dev
 ```
 
-La aplicación local se sirve en `http://localhost:3000`.
+La aplicación local se sirve en [http://localhost:3000](http://localhost:3000).
 
 ### 15.4 Ejecutar la demostración determinista
 

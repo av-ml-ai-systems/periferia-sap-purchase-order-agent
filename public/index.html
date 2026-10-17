@@ -1,0 +1,343 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agente de Órdenes de Compra SAP</title>
+  <style>
+    :root {
+      font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+      color: #172033;
+      background: #f3f5f9;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #102b50;
+      color: white;
+      padding: 22px 24px;
+    }
+
+    header h1 {
+      margin: 0 0 6px;
+      font-size: 22px;
+    }
+
+    header p {
+      margin: 0;
+      color: #d6e3f5;
+      font-size: 14px;
+    }
+
+    main {
+      max-width: 1100px;
+      margin: 24px auto;
+      padding: 0 16px;
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+      gap: 18px;
+    }
+
+    .panel {
+      background: white;
+      border: 1px solid #e0e5ed;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .panel h2 {
+      font-size: 16px;
+      margin: 0;
+      padding: 16px;
+      border-bottom: 1px solid #e8ebf1;
+    }
+
+    #messages {
+      height: 430px;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .message {
+      max-width: 90%;
+      padding: 12px 14px;
+      border-radius: 12px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    .assistant {
+      align-self: flex-start;
+      background: #edf2f8;
+    }
+
+    .user {
+      align-self: flex-end;
+      background: #dceafe;
+    }
+
+    .composer {
+      border-top: 1px solid #e8ebf1;
+      padding: 14px;
+    }
+
+    .composer form {
+      display: flex;
+      gap: 8px;
+    }
+
+    input, button {
+      font: inherit;
+      border-radius: 8px;
+      padding: 11px 12px;
+    }
+
+    input {
+      min-width: 0;
+      border: 1px solid #cbd3df;
+      flex: 1;
+    }
+
+    button {
+      border: 0;
+      background: #1559a6;
+      color: white;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
+
+    .suggestions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding-top: 12px;
+    }
+
+    .suggestions button {
+      background: #e9eff8;
+      color: #183b65;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    #tools {
+      padding: 14px;
+      max-height: 430px;
+      overflow-y: auto;
+    }
+
+    .tool {
+      border: 1px solid #e0e5ed;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+      font-size: 13px;
+    }
+
+    .tool strong {
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    .tool pre {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      margin: 8px 0 0;
+      font-size: 12px;
+    }
+
+    .status {
+      color: #536176;
+      font-size: 12px;
+      padding: 0 14px 12px;
+    }
+
+    #session {
+      color: #d6e3f5;
+      font-size: 12px;
+      margin-top: 8px;
+    }
+
+    @media (max-width: 760px) {
+      main { grid-template-columns: 1fr; }
+      #messages { height: 360px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Agente conversacional de órdenes de compra</h1>
+    <p>Validación de solicitudes, trazabilidad y confirmación antes de crear órdenes.</p>
+    <div id="session"></div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Conversación</h2>
+      <div id="messages" aria-live="polite"></div>
+
+      <div class="composer">
+        <form id="chat-form">
+          <input
+            id="message"
+            type="text"
+            placeholder="Ej.: Revisa la solicitud sol-001"
+            maxlength="4000"
+            autocomplete="off"
+            required
+          >
+          <button id="send" type="submit">Enviar</button>
+        </form>
+
+        <div class="suggestions">
+          <button type="button" data-message="Revisa la solicitud sol-001">Caso válido</button>
+          <button type="button" data-message="Revisa la solicitud sol-003">Caso bloqueado</button>
+          <button type="button" data-message="Revisa la solicitud sol-004">Requiere confirmación</button>
+          <button type="button" data-message="Revisa la solicitud sol-006">Datos por completar</button>
+        </div>
+      </div>
+      <div class="status" id="status">Conectando con la API...</div>
+    </section>
+
+    <aside class="panel">
+      <h2>Herramientas ejecutadas</h2>
+      <div id="tools">
+        <p class="status">Las llamadas a herramientas aparecerán aquí.</p>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const sessionId = crypto.randomUUID();
+    const messagesElement = document.getElementById("messages");
+    const toolsElement = document.getElementById("tools");
+    const form = document.getElementById("chat-form");
+    const input = document.getElementById("message");
+    const sendButton = document.getElementById("send");
+    const statusElement = document.getElementById("status");
+
+    document.getElementById("session").textContent =
+      `Sesión: ${sessionId}`;
+
+    function addMessage(role, content) {
+      const element = document.createElement("div");
+      element.className = `message ${role}`;
+      element.textContent = content;
+      messagesElement.appendChild(element);
+      messagesElement.scrollTop = messagesElement.scrollHeight;
+    }
+
+    function showTools(toolCalls) {
+      if (!toolCalls || toolCalls.length === 0) return;
+
+      const placeholder = toolsElement.querySelector(".status");
+      if (placeholder) placeholder.remove();
+
+      for (const call of toolCalls) {
+        const card = document.createElement("div");
+        card.className = "tool";
+
+        const title = document.createElement("strong");
+        title.textContent = `${call.tool} — ${call.status}`;
+
+        const details = document.createElement("pre");
+        details.textContent = JSON.stringify(call.result, null, 2);
+
+        card.append(title, details);
+        toolsElement.prepend(card);
+      }
+    }
+
+    async function sendMessage(message) {
+      const cleanMessage = message.trim();
+      if (!cleanMessage) return;
+
+      addMessage("user", cleanMessage);
+      input.value = "";
+      sendButton.disabled = true;
+      statusElement.textContent = "Procesando solicitud...";
+
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId,
+            message: cleanMessage
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Error al procesar la solicitud.");
+        }
+
+        addMessage("assistant", data.reply);
+        showTools(data.toolCalls);
+
+        statusElement.textContent = data.needsConfirmation
+          ? "Confirmación pendiente: responde «confirmo» o «cancelar»."
+          : "Listo.";
+      } catch (error) {
+        const messageError = error instanceof Error
+          ? error.message
+          : "Error de conexión.";
+
+        addMessage("assistant", `Error: ${messageError}`);
+        statusElement.textContent = "No se pudo completar la solicitud.";
+      } finally {
+        sendButton.disabled = false;
+        input.focus();
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await sendMessage(input.value);
+    });
+
+    document.querySelectorAll("[data-message]").forEach((button) => {
+      button.addEventListener("click", () => {
+        sendMessage(button.dataset.message || "");
+      });
+    });
+
+    fetch("/api/health")
+      .then((response) => {
+        if (!response.ok) throw new Error("API no disponible");
+        return response.json();
+      })
+      .then((data) => {
+        statusElement.textContent =
+          `API conectada · Proveedor: ${data.provider} · Modelo: ${data.model}`;
+      })
+      .catch(() => {
+        statusElement.textContent = "No se pudo conectar con la API.";
+      });
+
+    addMessage(
+      "assistant",
+      "¡Hola! Puedo revisar los casos de órdenes de compra de prueba. " +
+      "Selecciona un caso o escribe, por ejemplo, «Revisa la solicitud sol-001»."
+    );
+  </script>
+</body>
+</html>

@@ -3,8 +3,10 @@ import "dotenv/config";
 import express from "express";
 import path from "node:path";
 import { z } from "zod";
-import { oc_crear, oc_validar } from "./tools/oc.js";
-import { askOllama } from "./llm/ollama.js";
+import { oc_crear } from "./tools/oc.js";
+import { runAgent } from "./agent/agent.js";
+import { logAudit } from "./agent/audit.js";
+import type { LLMMessage } from "./llm/ollama.js";
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 3000);
@@ -18,15 +20,6 @@ const ChatRequest = z.object({
   message: z.string().min(1).max(4000),
 });
 
-const CaseId = z.enum([
-  "sol-001",
-  "sol-002",
-  "sol-003",
-  "sol-004",
-  "sol-005",
-  "sol-006",
-]);
-
 type ChatMessage = {
   role: "user" | "assistant";
   content: string;
@@ -36,6 +29,7 @@ type ChatMessage = {
 type ToolCall = {
   tool: string;
   status: "success" | "error";
+  arguments?: Record<string, unknown>;
   result: unknown;
 };
 
@@ -85,80 +79,32 @@ function isRejection(message: string): boolean {
   );
 }
 
-async function interpretCase(
-  message: string,
-): Promise<{ caseId: string | null; toolCall: ToolCall }> {
-  const directMatch = message.match(/\bsol-00[1-6]\b/i);
-
-  if (directMatch) {
-    const parsed = CaseId.safeParse(directMatch[0].toLowerCase());
-
-    return {
-      caseId: parsed.success ? parsed.data : null,
-      toolCall: {
-        tool: "resolver_identificador",
-        status: parsed.success ? "success" : "error",
-        result: {
-          source: "identificador explícito",
-          caseId: parsed.success ? parsed.data : null,
-        },
-      },
-    };
-  }
-
+async function auditCreation(
+  sessionId: string,
+  caseId: string,
+  result: unknown,
+  status: "success" | "error",
+): Promise<void> {
   try {
-    const response = await askOllama([
-      {
-        role: "system",
-        content:
-          "Eres un clasificador de solicitudes para un agente de órdenes de compra. " +
-          "Identifica cuál caso de prueba solicita el usuario. Los únicos casos " +
-          "válidos son sol-001, sol-002, sol-003, sol-004, sol-005 y sol-006. " +
-          "Si el usuario dice primer caso, caso uno o solicitud inicial, elige sol-001. " +
-          "Si menciona segundo caso, elige sol-002; tercero, sol-003; cuarto, sol-004; " +
-          "quinto, sol-005; sexto, sol-006. Si no se puede determinar, usa null. " +
-          'Responde únicamente JSON válido con esta forma: {"caseId":"sol-001"} ' +
-          'o {"caseId":null}. No ejecutes acciones ni inventes otros identificadores.',
-      },
-      { role: "user", content: message },
-    ]);
-
-    const jsonText = response.match(/\{[\s\S]*\}/)?.[0];
-    const parsedJson: unknown = jsonText ? JSON.parse(jsonText) : null;
-
-    const OutputSchema = z.object({
-      caseId: CaseId.nullable(),
+    await logAudit({
+      sessionId,
+      event: "tool_call",
+      tool: "oc_crear",
+      arguments: { caso: caseId, confirmado: true },
     });
 
-    const parsed = OutputSchema.safeParse(parsedJson);
-    const caseId = parsed.success ? parsed.data.caseId : null;
-
-    return {
-      caseId,
-      toolCall: {
-        tool: "ollama_interpretar_solicitud",
-        status: "success",
-        result: {
-          model: MODEL,
-          caseId,
-          rawResponse: response,
-        },
-      },
-    };
+    await logAudit({
+      sessionId,
+      event: status === "error" ? "tool_error" : "tool_result",
+      tool: "oc_crear",
+      arguments: { caso: caseId, confirmado: true },
+      result,
+    });
   } catch (error) {
-    return {
-      caseId: null,
-      toolCall: {
-        tool: "ollama_interpretar_solicitud",
-        status: "error",
-        result: {
-          error:
-            error instanceof Error
-              ? error.message
-              : "No fue posible interpretar la solicitud.",
-        },
-      },
-    };
+    console.error(
+      "No se pudo registrar la auditoría:",
+      error instanceof Error ? error.message : error,
+    );
   }
 }
 
@@ -167,7 +113,8 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     provider: "ollama",
     model: MODEL,
-    agentMode: "llm-assisted",
+    agentMode: "tool-calling-agent",
+    maxIterations: Number(process.env.AGENT_MAX_ITERATIONS ?? 8),
   });
 });
 
@@ -211,18 +158,32 @@ app.post("/api/chat", async (req, res) => {
       const caseId = session.pendingCase;
       const result = await oc_crear(caseId, true, sessionId);
 
+      const status =
+        result.resultado === "bloqueada" ? "error" : "success";
+
       toolCalls.push({
         tool: "oc_crear",
-        status: "success",
+        status,
+        arguments: { caso: caseId, confirmado: true },
         result,
       });
 
-      session.pendingCase = null;
+      await auditCreation(sessionId, caseId, result, status);
 
-      reply =
-        result.resultado === "creada"
-          ? `Orden creada correctamente para ${caseId}. Número de OC: ${result.numero_oc}.`
-          : `No se pudo crear la orden para ${caseId}: ${JSON.stringify(result)}`;
+      if (result.resultado === "creada") {
+        session.pendingCase = null;
+        reply =
+          `Orden creada correctamente para ${caseId}. ` +
+          `Número de OC: ${result.numero_oc}.`;
+      } else if (result.resultado === "pendiente_confirmacion") {
+        needsConfirmation = true;
+        reply =
+          `La solicitud ${caseId} todavía requiere confirmación. ` +
+          JSON.stringify(result);
+      } else {
+        session.pendingCase = null;
+        reply = `No se pudo crear la orden para ${caseId}: ${JSON.stringify(result)}`;
+      }
     } else if (session.pendingCase && isRejection(message)) {
       const caseId = session.pendingCase;
       session.pendingCase = null;
@@ -233,61 +194,30 @@ app.post("/api/chat", async (req, res) => {
         `La solicitud ${session.pendingCase} sigue pendiente de confirmación. ` +
         "Responde «confirmo» para continuar o «cancelar» para detener la operación.";
     } else {
-      const interpretation = await interpretCase(message);
-      toolCalls.push(interpretation.toolCall);
+      const history: LLMMessage[] = session.history
+        .slice(0, -1)
+        .map((entry) => ({
+          role: entry.role,
+          content: entry.content,
+        }));
 
-      const caseId = interpretation.caseId;
+      const result = await runAgent({
+        sessionId,
+        message,
+        history,
+      });
 
-      if (!caseId) {
-        reply =
-          "Puedo revisar los seis casos de prueba de órdenes de compra. " +
-          "Indica el número de caso, por ejemplo «Revisa sol-001» o «Revisa el primer caso». " +
-          "Si Ollama no está disponible, escribe el identificador explícito.";
-      } else {
-        const validation = await oc_validar(caseId);
+      reply = result.reply;
+      needsConfirmation = result.needsConfirmation;
+      session.pendingCase = result.pendingCase;
 
-        toolCalls.push(
-          {
-            tool: "oc_leer_paquete",
-            status: "success",
-            result: {
-              caso: caseId,
-              faltantes: validation.paquete.faltantes,
-            },
-          },
-          {
-            tool: "oc_validar",
-            status: "success",
-            result: validation.validacion,
-          },
-        );
-
-        if (!validation.validacion.apta) {
-          reply =
-            `La solicitud ${caseId} está bloqueada. ` +
-            validation.validacion.bloqueos.join(" ");
-        } else if (validation.validacion.confirmaciones.length > 0) {
-          session.pendingCase = caseId;
-          needsConfirmation = true;
-
-          reply =
-            `La solicitud ${caseId} requiere tu confirmación antes de crear la orden:\n- ` +
-            validation.validacion.confirmaciones.join("\n- ") +
-            "\n\nResponde «confirmo» para continuar o «cancelar» para detener la operación.";
-        } else {
-          const result = await oc_crear(caseId);
-
-          toolCalls.push({
-            tool: "oc_crear",
-            status: result.resultado === "bloqueada" ? "error" : "success",
-            result,
-          });
-
-          reply =
-            result.resultado === "creada"
-              ? `Orden creada correctamente. Número de OC: ${result.numero_oc}.`
-              : `No se creó la orden: ${JSON.stringify(result)}`;
-        }
+      for (const call of result.toolCalls) {
+        toolCalls.push({
+          tool: call.tool,
+          status: call.status,
+          arguments: call.arguments,
+          result: call.result,
+        });
       }
     }
 
@@ -303,10 +233,17 @@ app.post("/api/chat", async (req, res) => {
     const messageError =
       error instanceof Error ? error.message : "Error interno.";
 
+    addMessage(
+      session,
+      "assistant",
+      `No se pudo completar la solicitud: ${messageError}`,
+    );
+
     res.status(500).json({
       sessionId,
       error: messageError,
       toolCalls,
+      needsConfirmation: session.pendingCase !== null,
     });
   }
 });

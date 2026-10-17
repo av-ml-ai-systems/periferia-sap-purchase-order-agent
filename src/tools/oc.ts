@@ -2,9 +2,13 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
+import type { OrdenCompra } from "../sap/adapter.js";
+import { MockSapAdapter } from "../sap/mock.js";
+
 const ROOT = process.cwd();
 const FIXTURES = path.join(ROOT, "fixtures", "reto-03");
 const OUT = path.join(ROOT, "out");
+const sapAdapter = new MockSapAdapter();
 
 type Solicitud = {
   solicitud_id: string;
@@ -85,10 +89,11 @@ function totalCotizacion(text: string | null): number | null {
     return null;
   }
 
-  const lines = text.split(/\r?\n/);
-  const line = lines.find(
-    (item) => /\btotal\b/i.test(item) && !/subtotal/i.test(item),
-  );
+  const line = text
+    .split(/\r?\n/)
+    .find(
+      (item) => /\btotal\b/i.test(item) && !/subtotal/i.test(item),
+    );
 
   if (!line) {
     return null;
@@ -186,7 +191,7 @@ export async function oc_validar(
   const proveedor = proveedores.find((item) =>
     solicitud.proveedor_nit
       ? item.nit.replace(/\D/g, "") ===
-        solicitud.proveedor_nit!.replace(/\D/g, "")
+        solicitud.proveedor_nit.replace(/\D/g, "")
       : normalizar(item.nombre) ===
         normalizar(solicitud.proveedor_nombre),
   );
@@ -227,7 +232,6 @@ export async function oc_validar(
     );
   }
 
-  // RC3: comprobar el tope incluso si quien aprobó no está autorizado.
   const topeAplicable =
     aprobador?.tope ??
     (centro && centro.aprobadores.length > 0
@@ -346,6 +350,7 @@ export async function oc_generar_evidencia(caseId: string) {
     .digest("hex");
 
   const destino = path.join(OUT, caseId, "aprobacion.txt");
+
   await fs.mkdir(path.dirname(destino), { recursive: true });
   await fs.writeFile(
     destino,
@@ -356,7 +361,9 @@ export async function oc_generar_evidencia(caseId: string) {
   return { path: destino, sha256 };
 }
 
-export async function oc_construir_payload(caseId: string) {
+export async function oc_construir_payload(
+  caseId: string,
+): Promise<{ payload: OrdenCompra; validacion: Validacion }> {
   const { paquete, validacion } = await oc_validar(caseId);
   const solicitud = paquete.solicitud;
 
@@ -379,7 +386,7 @@ export async function oc_construir_payload(caseId: string) {
   const proveedor = proveedores.find((item) =>
     solicitud.proveedor_nit
       ? item.nit.replace(/\D/g, "") ===
-        solicitud.proveedor_nit!.replace(/\D/g, "")
+        solicitud.proveedor_nit.replace(/\D/g, "")
       : normalizar(item.nombre) ===
         normalizar(solicitud.proveedor_nombre),
   );
@@ -390,7 +397,7 @@ export async function oc_construir_payload(caseId: string) {
 
   const evidencia = await oc_generar_evidencia(caseId);
 
-  const payload = {
+  const payload: OrdenCompra = {
     referencia: {
       solicitud_id: solicitud.solicitud_id,
       correo_id: String(paquete.correo?.id ?? caseId),
@@ -431,11 +438,12 @@ export async function oc_construir_payload(caseId: string) {
     excepciones: validacion.confirmaciones.map((detalle) => ({
       codigo: detalle.slice(0, 3),
       detalle,
-      confirmado_por: null as string | null,
+      confirmado_por: null,
     })),
   };
 
   const destino = path.join(OUT, caseId, "trazabilidad.json");
+
   await fs.mkdir(path.dirname(destino), { recursive: true });
   await fs.writeFile(
     destino,
@@ -465,6 +473,7 @@ async function registrarControl(
   validacion: Validacion,
 ): Promise<void> {
   const file = path.join(OUT, "control.csv");
+
   await fs.mkdir(path.dirname(file), { recursive: true });
 
   if (!(await texto(file))) {
@@ -533,65 +542,83 @@ export async function oc_crear(
     };
   }
 
-  const sapFile = path.join(OUT, "sap", "ordenes.jsonl");
-  await fs.mkdir(path.dirname(sapFile), { recursive: true });
+  const nit = solicitud.proveedor_nit;
 
-  const lines = (await texto(sapFile) ?? "")
-    .split(/\r?\n/)
-    .filter(Boolean);
+  if (!nit) {
+    await registrarControl(
+      solicitud.solicitud_id,
+      "bloqueada",
+      "",
+      validacion,
+    );
 
-  for (const line of lines) {
-    try {
-      const order = JSON.parse(line) as {
-        solicitud_id?: string;
-        numero_oc?: string;
-      };
+    return {
+      resultado: "bloqueada",
+      motivo: "No hay NIT para consultar al proveedor en SAP.",
+    };
+  }
 
-      if (order.solicitud_id === solicitud.solicitud_id) {
-        return {
-          resultado: "creada",
-          numero_oc: order.numero_oc,
-          idempotente: true,
-        };
-      }
-    } catch {
-      // Ignora registros históricos malformados.
-    }
+  const proveedorSap = await sapAdapter.consultarProveedor(nit);
+
+  if (!proveedorSap || !proveedorSap.activo) {
+    const motivo = !proveedorSap
+      ? "RC1: proveedor inexistente en el maestro SAP."
+      : "RC1: proveedor inactivo en SAP.";
+
+    const validacionProveedor: Validacion = {
+      ...validacion,
+      apta: false,
+      bloqueos: [...validacion.bloqueos, motivo],
+    };
+
+    await registrarControl(
+      solicitud.solicitud_id,
+      "bloqueada",
+      "",
+      validacionProveedor,
+    );
+
+    return {
+      resultado: "bloqueada",
+      bloqueos: validacionProveedor.bloqueos,
+    };
+  }
+
+  const existente = await sapAdapter.buscarOrdenPorReferencia(
+    solicitud.solicitud_id,
+  );
+
+  if (existente) {
+    return {
+      resultado: "creada",
+      numero_oc: existente.numero_oc,
+      idempotente: true,
+    };
   }
 
   const { payload } = await oc_construir_payload(caseId);
-  const numeroOC = String(4500000001 + lines.length);
 
-  const order = {
-    numero_oc: numeroOC,
-    solicitud_id: solicitud.solicitud_id,
-    fecha: new Date().toISOString(),
-    retroactiva: validacion.retroactiva,
-    payload: {
-      ...payload,
-      excepciones: payload.excepciones.map((item) => ({
-        ...item,
-        confirmado_por: confirmado ? confirmadoPor : null,
-      })),
-    },
+  const payloadConConfirmacion: OrdenCompra = {
+    ...payload,
+    excepciones: payload.excepciones.map((item) => ({
+      ...item,
+      confirmado_por: confirmado ? confirmadoPor : null,
+    })),
   };
 
-  await fs.appendFile(
-    sapFile,
-    `${JSON.stringify(order)}\n`,
-    "utf8",
-  );
+  const creada = await sapAdapter.crearOrden(payloadConConfirmacion);
 
   await registrarControl(
     solicitud.solicitud_id,
     "creada",
-    numeroOC,
+    creada.numero_oc,
     validacion,
   );
 
   return {
     resultado: "creada",
-    numero_oc: numeroOC,
+    numero_oc: creada.numero_oc,
     retroactiva: validacion.retroactiva,
+    idempotente: false,
   };
 }
